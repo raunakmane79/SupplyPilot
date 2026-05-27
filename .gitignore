@@ -1,0 +1,20 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Local databases
+data/*.db
+data/supplypilot.db
+
+# Streamlit config/cache
+.streamlit/
+pages/__pycache__/
+src/__pycache__/
