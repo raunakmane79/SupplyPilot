@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from src.database import load_dataframe_from_table
+from src.database import get_db_connection, load_dataframe_from_table
 from src.styling import inject_custom_css
 from src.forecasting import generate_forecasts
 from src.charts import plot_actual_vs_forecast
@@ -27,6 +27,17 @@ st.sidebar.info(
 st.title("Demand Forecasting Lab")
 st.markdown("### Advanced Statistical SKU Forecasting Models")
 
+# Alter sku_master schema if forecast_method_override doesn't exist
+# Runs safely in SQLite
+conn = get_db_connection()
+try:
+    conn.execute("ALTER TABLE sku_master ADD COLUMN forecast_method_override TEXT")
+    conn.commit()
+except Exception:
+    # Column already exists
+    pass
+conn.close()
+
 # 1. Load data
 df_demand = load_dataframe_from_table('demand_history')
 df_sku = load_dataframe_from_table('sku_master')
@@ -44,7 +55,6 @@ else:
         sku_row = df_sku[df_sku['sku_id'] == selected_sku_id].iloc[0]
         
     with col2:
-        # Load unique warehouses for this SKU
         wh_options = ["All Warehouses"] + sorted(df_demand[df_demand['sku_id'] == selected_sku_id]['warehouse_id'].dropna().unique().tolist())
         selected_wh_option = st.selectbox("Select Warehouse Aggregation", wh_options)
         selected_wh_id = None if selected_wh_option == "All Warehouses" else selected_wh_option
@@ -65,24 +75,72 @@ else:
         m_col1, m_col2, m_col3 = st.columns(3)
         
         with m_col1:
-            st.metric(
-                label="Simple Moving Average (4-Week)",
-                value=f"{metrics['moving_average']:.1f}% MAPE",
-                delta="Flat projection"
-            )
+            with st.container(border=True):
+                st.metric(label="Simple Moving Average (4-Week)", value=f"{metrics['moving_average']:.1f}% MAPE")
         with m_col2:
-            st.metric(
-                label="Weighted Moving Average (4-Week)",
-                value=f"{metrics['weighted_moving_average']:.1f}% MAPE",
-                delta="Recent-weighted (0.4, 0.3, 0.2, 0.1)"
-            )
+            with st.container(border=True):
+                st.metric(label="Weighted Moving Average (4-Week)", value=f"{metrics['weighted_moving_average']:.1f}% MAPE")
         with m_col3:
-            st.metric(
-                label="Exponential Smoothing (α=0.3)",
-                value=f"{metrics['exponential_smoothing']:.1f}% MAPE",
-                delta="Smooth level transition"
+            with st.container(border=True):
+                st.metric(label="Exponential Smoothing (α=0.3)", value=f"{metrics['exponential_smoothing']:.1f}% MAPE")
+            
+        # Model selector and optimizer actions
+        st.markdown("#### Model Optimization Control")
+        col_ctrl1, col_ctrl2 = st.columns(2)
+        
+        # Check current model override from DB
+        current_override = sku_row.get('forecast_method_override', 'exponential_smoothing')
+        current_override = current_override if current_override else 'exponential_smoothing'
+        
+        model_names_map = {
+            'moving_average': 'Simple Moving Average',
+            'weighted_moving_average': 'Weighted Moving Average',
+            'exponential_smoothing': 'Exponential Smoothing'
+        }
+        
+        # Display current active plan model
+        st.write(f"**Current Active Planning Model:** `{model_names_map.get(current_override, 'Exponential Smoothing')}`")
+        
+        with col_ctrl1:
+            model_options = list(model_names_map.keys())
+            model_display_names = list(model_names_map.values())
+            
+            selected_model = st.selectbox(
+                "Manual Model Select Override", 
+                model_display_names, 
+                index=model_options.index(current_override) if current_override in model_options else 2
             )
             
+            # Save manually selected model
+            manual_model_key = [k for k, v in model_names_map.items() if v == selected_model][0]
+            btn_save_model = st.button("🎯 Set Selected Model as Active")
+            
+            if btn_save_model:
+                conn = get_db_connection()
+                conn.execute("UPDATE sku_master SET forecast_method_override = ? WHERE sku_id = ?", (manual_model_key, selected_sku_id))
+                conn.commit()
+                conn.close()
+                st.success(f"Active planning model updated to {selected_model} in SQLite!")
+                st.rerun()
+                
+        with col_ctrl2:
+            st.write("Let the system select the best performing forecasting model based on the lowest historical fitting error (MAPE).")
+            btn_optimize = st.button("⚡ Run Algorithmic Model Optimizer", type="primary")
+            
+            if btn_optimize:
+                # Find model with lowest MAPE value
+                best_model_key = min(metrics, key=metrics.get)
+                best_model_name = model_names_map[best_model_key]
+                best_mape = metrics[best_model_key]
+                
+                conn = get_db_connection()
+                conn.execute("UPDATE sku_master SET forecast_method_override = ? WHERE sku_id = ?", (best_model_key, selected_sku_id))
+                conn.commit()
+                conn.close()
+                
+                st.success(f"Optimized! `{best_model_name}` selected as active planning model (Lowest MAPE: {best_mape:.1f}%). Committed to SQLite database.")
+                st.rerun()
+                
         st.markdown("---")
         
         # 4. Chart Display

@@ -35,23 +35,27 @@ df_inventory = load_dataframe_from_table('inventory_status')
 if df_bom.empty or df_sku.empty or df_inventory.empty:
     st.warning("⚠️ No BOM/Kit structures or inventory data found. Initialize the database on the **Data Upload & Templates** page.")
 else:
-    # Get parent kits list
     parent_ids = df_bom['parent_sku_id'].unique().tolist()
     parent_skus = df_sku[df_sku['sku_id'].isin(parent_ids)]
     
     if parent_skus.empty:
         st.info("No parent kits or bundles currently active in sku_master.")
     else:
-        # 2. Select parent SKU
+        # 2. Select parent SKU and Warehouse Location
         kit_options = parent_skus.apply(lambda r: f"{r['sku_id']} | {r['sku_name']}", axis=1).tolist()
-        selected_kit_option = st.selectbox("Select Parent Kit / Bundle to Audit", kit_options)
         
-        selected_parent_id = selected_kit_option.split(" | ")[0]
-        parent_row = parent_skus[parent_skus['sku_id'] == selected_parent_id].iloc[0]
-        
+        col_sel1, col_sel2 = st.columns(2)
+        with col_sel1:
+            selected_kit_option = st.selectbox("Select Parent Kit / Bundle to Audit", kit_options)
+            selected_parent_id = selected_kit_option.split(" | ")[0]
+            parent_row = parent_skus[parent_skus['sku_id'] == selected_parent_id].iloc[0]
+            
+        with col_sel2:
+            unique_warehouses = ["All Warehouses"] + sorted(df_inventory['warehouse_id'].dropna().unique().tolist())
+            selected_wh = st.selectbox("Select Assembly Warehouse Location", unique_warehouses)
+
         # 3. Load components for this parent
         kit_name = df_bom[df_bom['parent_sku_id'] == selected_parent_id]['kit_name'].iloc[0]
-        
         df_kit_bom = df_bom[df_bom['parent_sku_id'] == selected_parent_id].copy()
         
         # Get component SKU details (names)
@@ -62,8 +66,13 @@ else:
             how='inner'
         )
         
-        # Aggregate on-hand stock for components across all warehouses
-        df_inv_agg = df_inventory.groupby('sku_id')['on_hand_qty'].sum().reset_index()
+        # Filter inventory based on selected warehouse
+        df_inventory_filtered = df_inventory.copy()
+        if selected_wh != "All Warehouses":
+            df_inventory_filtered = df_inventory_filtered[df_inventory_filtered['warehouse_id'] == selected_wh]
+            
+        # Aggregate on-hand stock for components
+        df_inv_agg = df_inventory_filtered.groupby('sku_id')['on_hand_qty'].sum().reset_index()
         df_kit_bom = df_kit_bom.merge(df_inv_agg, on='sku_id', how='left')
         df_kit_bom['on_hand_qty'] = df_kit_bom['on_hand_qty'].fillna(0).astype(int)
         
@@ -79,31 +88,42 @@ else:
         bottleneck_name = bottleneck_row['sku_name']
         
         # Total cost to assemble one kit
-        kit_unit_cost = (df_kit_bom['component_qty'] * df_kit_bom['unit_cost']).sum()
+        df_kit_bom['component_cost_share'] = df_kit_bom['component_qty'] * df_kit_bom['unit_cost']
+        kit_unit_cost = df_kit_bom['component_cost_share'].sum()
         
-        # Display Kit KPI Summary Card
-        st.markdown(f"#### Kit Profile: **{kit_name}**")
+        # Calculate percentage cost share for each component
+        if kit_unit_cost > 0:
+            df_kit_bom['cost_share_pct'] = (df_kit_bom['component_cost_share'] / kit_unit_cost) * 100.0
+        else:
+            df_kit_bom['cost_share_pct'] = 0.0
+        
+        # Display Kit KPI Summary Card using native widgets
+        st.markdown(f"#### Kit Profile: **{kit_name}** ({selected_wh})")
         
         col_k1, col_k2, col_k3, col_k4 = st.columns(4)
         with col_k1:
-            st.metric(label="Total Buildable Units", value=f"{max_kits_buildable} Kits", delta="Based on components on-hand")
+            with st.container(border=True):
+                st.metric(label="Total Buildable Units", value=f"{max_kits_buildable} Kits", help="Based on active component warehouse stock")
         with col_k2:
-            st.metric(label="Primary Bottleneck Component", value=f"{bottleneck_id}", delta=bottleneck_name[:25])
+            with st.container(border=True):
+                st.metric(label="Primary Bottleneck Component", value=f"{bottleneck_id}", delta=bottleneck_name[:25], delta_color="inverse")
         with col_k3:
-            st.metric(label="Total Bill-of-Materials Cost", value=f"${kit_unit_cost:,.2f} / Kit", delta="Sum of components")
+            with st.container(border=True):
+                st.metric(label="Total Bill-of-Materials Cost", value=f"${kit_unit_cost:,.2f} / Kit", help="Sum of components standard costs")
         with col_k4:
-            st.metric(label="Active Components", value=f"{len(df_kit_bom)} items", delta="BOM lines")
+            with st.container(border=True):
+                st.metric(label="Active Components", value=f"{len(df_kit_bom)} items")
             
         st.markdown("---")
         
         # 5. Dynamic BOM Planner Widget
-        st.subheader("🛠️ Assembly Production Simulator")
+        st.subheader("🛠/ Simulates Assembly Run & Component Shortages")
         target_build_qty = st.number_input(
             "Enter Target Kit Run (Assembly Volume)", 
             min_value=1, 
             value=100, 
             step=10, 
-            help="Simulates component shortages and replenishment orders required to assemble this quantity of kits."
+            help="Simulates component shortages and replenishment costs required to assemble this quantity of kits."
         )
         
         # Calculate shortages
@@ -116,27 +136,22 @@ else:
         # 6. Component breakdown table
         st.subheader("📋 Component Inventory Breakdown")
         
-        # Format columns for display
         df_mrp_table = df_kit_bom[[
             'component_sku_id', 'sku_name', 'component_qty', 'on_hand_qty', 
-            'max_buildable', 'qty_needed_for_run', 'shortage', 'shortage_cost'
+            'max_buildable', 'cost_share_pct', 'qty_needed_for_run', 'shortage', 'shortage_cost'
         ]].copy()
         
         df_mrp_table.columns = [
             'Component SKU', 'Description', 'Qty Per Kit', 'On Hand Stock', 
-            'Buildable Limit', 'Needed for Run', 'Shortage', 'Shortage Cost'
+            'Buildable Limit', 'Cost Share (%)', 'Needed for Run', 'Shortage', 'Shortage Cost'
         ]
         
-        # Add highlighted styling to bottleneck row
-        def highlight_bottleneck(val):
-            # We want to highlight the row matching the bottleneck SKU
-            pass
-            
         st.dataframe(
             df_mrp_table.style.format({
                 'Qty Per Kit': '{:,}',
                 'On Hand Stock': '{:,}',
                 'Buildable Limit': '{:,}',
+                'Cost Share (%)': '{:.1f}%',
                 'Needed for Run': '{:,}',
                 'Shortage': '{:,}',
                 'Shortage Cost': '${:,.2f}'
@@ -164,7 +179,7 @@ else:
                 )
                 st.markdown(
                     f"""
-                    <div class="saas-card" style="border-left: 4px solid #ffa657; background-color: rgba(240, 136, 62, 0.05);">
+                    <div style="border-left: 4px solid #f97316; background-color: #111827; padding: 18px; border-radius: 6px;">
                         {report}
                     </div>
                     """,

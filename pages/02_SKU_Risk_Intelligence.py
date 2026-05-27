@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
-from src.database import load_dataframe_from_table
-from src.styling import inject_custom_css, create_kpi_card
+from src.database import get_db_connection, load_dataframe_from_table
+from src.styling import inject_custom_css
 from src.calculations import compute_inventory_parameters
 from src.risk_scoring import calculate_stockout_risk_score, classify_risk_level
 from src.charts import plot_historical_demand, plot_actual_vs_forecast
 from src.forecasting import generate_forecasts
 from src.ai_assistant import explain_sku_risk_ai
+from src.recommendations import generate_recommendations
 
 # Page Setup
 st.set_page_config(
@@ -38,7 +39,6 @@ def load_sku_intelligence_data():
     if df_recs.empty or df_sku.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-    # Merge everything for detailed SKU view
     df_merged = df_recs.merge(
         df_sku[['sku_id', 'sku_name', 'category', 'product_family', 'unit_cost', 'selling_price', 'moq', 'case_pack_qty', 'service_level_target', 'default_lead_time_days', 'criticality', 'lifecycle_status', 'seasonal_flag']], 
         on='sku_id', 
@@ -50,8 +50,6 @@ def load_sku_intelligence_data():
         how='left'
     )
     
-    # Calculate ROP, safety stock, and inventory position details
-    # Join with current inventory status for warehouse parameters
     df_inventory_details = df_inventory.merge(df_merged, on=['sku_id', 'warehouse_id'], how='inner')
     
     return df_inventory_details, df_supplier, df_po, df_recs
@@ -121,14 +119,12 @@ else:
     # Display SKU Matrix
     st.markdown(f"**Filtered Results:** Showing `{len(df_filtered)}` SKU-Warehouse intersections.")
     
-    # Format table for cleaner display
     df_table = df_filtered[[
         'sku_id', 'sku_name', 'warehouse_id', 'supplier_name', 'on_hand_qty', 
         'inventory_position', 'days_of_cover', 'reorder_point', 'suggested_order_qty', 
         'risk_level', 'estimated_stockout_value', 'suggested_action'
     ]].copy()
     
-    # Render interactive table
     st.dataframe(
         df_table.style.format({
             'on_hand_qty': '{:,}',
@@ -150,11 +146,9 @@ else:
     if df_filtered.empty:
         st.info("No SKUs match the current filters. Adjust your filters to inspect a SKU.")
     else:
-        # Selectbox to inspect single SKU-Warehouse
         sku_options = df_filtered.apply(lambda r: f"{r['sku_id']} | {r['sku_name']} ({r['warehouse_id']})", axis=1).tolist()
         selected_option = st.selectbox("Select SKU-Warehouse to Inspect", sku_options)
         
-        # Get selected SKU record
         selected_idx = sku_options.index(selected_option)
         sku_record = df_filtered.iloc[selected_idx]
         
@@ -165,8 +159,8 @@ else:
         st.markdown(f"**SKU ID:** `{selected_sku_id}` | **Category:** `{sku_record['category']}` | **Fulfillment Center:** `{selected_wh_id}`")
         
         # Details layout (Tabs)
-        tab_inv, tab_reorder, tab_supplier, tab_forecast, tab_ai = st.tabs([
-            "📦 Stock & PO Summary", "⚙️ Reorder Logic", "🚚 Supplier Scorecard", "📈 Demand & Forecast Lab", "🤖 AI Risk Assistant"
+        tab_inv, tab_reorder, tab_supplier, tab_forecast, tab_ai, tab_edit = st.tabs([
+            "📦 Stock & PO Summary", "⚙️ Reorder Logic", "🚚 Supplier Scorecard", "📈 Demand & Forecast Lab", "🤖 AI Risk Assistant", "✏️ Edit SKU Parameters"
         ])
         
         with tab_inv:
@@ -232,7 +226,6 @@ else:
                 st.write(f"**Reliability Score:** {sku_record['risk_score']}/100")
                 
         with tab_forecast:
-            # Generate demand & forecast
             df_demand_db = load_dataframe_from_table('demand_history')
             df_hist, df_fc, metrics = generate_forecasts(df_demand_db, selected_sku_id, selected_wh_id)
             
@@ -249,7 +242,7 @@ else:
                         st.markdown("**Historical Fitting Error (MAPE):**")
                         st.metric("Simple Moving Average", f"{metrics['moving_average']:.1f}% MAPE")
                         st.metric("Weighted Moving Average", f"{metrics['weighted_moving_average']:.1f}% MAPE")
-                        st.metric("Exponential Smoothing (Single)", f"{metrics['exponential_smoothing']:.1f}% MAPE")
+                        st.metric("Exponential Smoothing", f"{metrics['exponential_smoothing']:.1f}% MAPE")
                     else:
                         st.info("Insufficient demand history to compute forecast accuracy metrics.")
 
@@ -257,11 +250,9 @@ else:
             st.markdown("#### SupplyPilot AI Risk Analysis")
             st.write("Calculates a natural language explanation of risk status, supplier safety buffers, and PO scheduling gap delays.")
             
-            # Button to trigger AI
             btn_ai = st.button("🤖 Generate AI SKU Risk Analysis")
             if btn_ai:
                 with st.spinner("Analyzing parameters and generating SKU-level briefing..."):
-                    # Find open POs
                     df_po_active = df_po[
                         (df_po['sku_id'] == selected_sku_id) & 
                         (df_po['warehouse_id'] == selected_wh_id) & 
@@ -271,9 +262,87 @@ else:
                     
                     st.markdown(
                         f"""
-                        <div class="saas-card" style="border-left: 4px solid #1f6feb; background-color: rgba(31, 111, 235, 0.05);">
+                        <div style="border-left: 4px solid #3b82f6; background-color: #111827; padding: 18px; border-radius: 6px;">
                             {analysis_text}
                         </div>
                         """,
                         unsafe_allow_html=True
                     )
+                    
+        with tab_edit:
+            st.markdown("#### Edit SKU Master Parameters")
+            st.write("Modify planning constraints for this SKU. Saving will update the database and recalculate recommendations.")
+            
+            # Form to prevent multiple updates on single changes
+            with st.form("edit_sku_form"):
+                col_e1, col_e2 = st.columns(2)
+                
+                with col_e1:
+                    edit_service_level = st.slider(
+                        "Target Service Level Target", 
+                        min_value=0.80, 
+                        max_value=0.99, 
+                        value=float(sku_record['service_level_target']), 
+                        step=0.01,
+                        format="%.2f"
+                    )
+                    edit_lead_time = st.number_input(
+                        "Default Lead Time (Days)", 
+                        min_value=1, 
+                        max_value=180, 
+                        value=int(sku_record['default_lead_time_days'])
+                    )
+                    edit_moq = st.number_input(
+                        "Minimum Order Quantity (MOQ)", 
+                        min_value=1, 
+                        value=int(sku_record['moq'])
+                    )
+                    edit_case_pack = st.number_input(
+                        "Case Pack Qty", 
+                        min_value=1, 
+                        value=int(sku_record['case_pack_qty']) if sku_record['case_pack_qty'] else 12
+                    )
+                    
+                with col_e2:
+                    edit_cost = st.number_input(
+                        "Unit Cost ($)", 
+                        min_value=0.1, 
+                        value=float(sku_record['unit_cost']), 
+                        format="%.2f"
+                    )
+                    edit_price = st.number_input(
+                        "Selling Price ($)", 
+                        min_value=0.1, 
+                        value=float(sku_record['selling_price']), 
+                        format="%.2f"
+                    )
+                    
+                    status_list = ["Active", "Phase-out", "Discontinued", "Launch"]
+                    current_status_idx = status_list.index(sku_record['lifecycle_status']) if sku_record['lifecycle_status'] in status_list else 0
+                    edit_status = st.selectbox(
+                        "Product Lifecycle Status", 
+                        status_list, 
+                        index=current_status_idx
+                    )
+                
+                submit_edit = st.form_submit_button("💾 Save Parameters & Recalculate")
+                
+                if submit_edit:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE sku_master 
+                        SET service_level_target = ?, default_lead_time_days = ?, moq = ?, 
+                            case_pack_qty = ?, unit_cost = ?, selling_price = ?, lifecycle_status = ? 
+                        WHERE sku_id = ?
+                    """, (edit_service_level, edit_lead_time, edit_moq, edit_case_pack, edit_cost, edit_price, edit_status, selected_sku_id))
+                    conn.commit()
+                    conn.close()
+                    
+                    # Recalculate
+                    generate_recommendations()
+                    
+                    # Reset cache
+                    st.cache_data.clear()
+                    st.success("SKU parameters updated and planning thresholds recalculated successfully!")
+                    st.rerun()

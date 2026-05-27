@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.express as px
 from src.database import load_dataframe_from_table
-from src.styling import inject_custom_css, create_kpi_card
+from src.styling import inject_custom_css
 from src.calculations import compute_inventory_parameters
 from src.risk_scoring import calculate_stockout_risk_score, classify_risk_level, compute_excess_inventory
+from src.charts import apply_chart_theme
 
 # Page Setup
 st.set_page_config(
@@ -79,15 +81,15 @@ else:
     baseline_high = len(df_recs[df_recs['risk_level'] == 'High'])
     baseline_stockout_val = df_recs['estimated_stockout_value'].sum()
     
-    # Calculate baseline capital needed
-    df_sku_costs = df_sku[['sku_id', 'unit_cost']]
+    # Calculate baseline capital needed by category
+    df_sku_costs = df_sku[['sku_id', 'unit_cost', 'category']]
     df_recs_cost = df_recs.merge(df_sku_costs, on='sku_id', how='left')
-    baseline_capital = (df_recs_cost['suggested_order_qty'] * df_recs_cost['unit_cost']).sum()
+    df_recs_cost['baseline_cost'] = df_recs_cost['suggested_order_qty'] * df_recs_cost['unit_cost']
+    baseline_capital = df_recs_cost['baseline_cost'].sum()
     baseline_excess = df_recs['excess_inventory_value'].sum()
 
     # 3. Compute Simulated Scenario in Memory
     with st.spinner("Simulating scenario parameters across 500 SKUs..."):
-        # Run computations with simulation sliders applied
         df_sim = compute_inventory_parameters(
             df_sku, df_inventory, df_demand, df_po, df_supplier,
             demand_increase_pct=sim_demand_increase,
@@ -122,61 +124,50 @@ else:
         sim_capital = df_sim['financial_impact'].sum()
         sim_excess = df_sim['excess_inventory_value'].sum()
 
-    # 4. Show KPI Deltas
-    # Delta values
+    # 4. Show KPI Deltas using native elements
     crit_delta = sim_critical - baseline_critical
     stockout_delta = sim_stockout_val - baseline_stockout_val
     capital_delta = sim_capital - baseline_capital
     excess_delta = sim_excess - baseline_excess
     
+    st.subheader("Scenario Delta Scorecard")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(
-            create_kpi_card(
-                "Simulated Critical SKUs", 
-                f"{sim_critical} SKUs", 
-                f"{'+' if crit_delta >= 0 else ''}{crit_delta} vs Baseline", 
-                "down" if crit_delta > 0 else ("up" if crit_delta < 0 else "neutral")
-            ), 
-            unsafe_allow_html=True
-        )
+        with st.container(border=True):
+            st.metric(
+                label="Simulated Critical SKUs", 
+                value=f"{sim_critical} SKUs", 
+                delta=f"{crit_delta} vs Baseline", 
+                delta_color="inverse"
+            )
     with col2:
-        st.markdown(
-            create_kpi_card(
-                "Simulated Stockout Exposure", 
-                f"${sim_stockout_val:,.2f}", 
-                f"{'+' if stockout_delta >= 0 else ''}${stockout_delta:,.2f} vs Baseline", 
-                "down" if stockout_delta > 0 else ("up" if stockout_delta < 0 else "neutral")
-            ), 
-            unsafe_allow_html=True
-        )
+        with st.container(border=True):
+            st.metric(
+                label="Simulated Stockout Exposure", 
+                value=f"${sim_stockout_val:,.0f}", 
+                delta=f"${stockout_delta:,.0f} vs Baseline", 
+                delta_color="inverse"
+            )
     with col3:
-        st.markdown(
-            create_kpi_card(
-                "Required Order Capital", 
-                f"${sim_capital:,.2f}", 
-                f"{'+' if capital_delta >= 0 else ''}${capital_delta:,.2f} vs Baseline", 
-                "neutral"
-            ), 
-            unsafe_allow_html=True
-        )
+        with st.container(border=True):
+            st.metric(
+                label="Required Order Capital", 
+                value=f"${sim_capital:,.0f}", 
+                delta=f"${capital_delta:,.0f} vs Baseline"
+            )
     with col4:
-        st.markdown(
-            create_kpi_card(
-                "Simulated Excess Capital", 
-                f"${sim_excess:,.2f}", 
-                f"{'+' if excess_delta >= 0 else ''}${excess_delta:,.2f} vs Baseline", 
-                "down" if excess_delta > 0 else ("up" if excess_delta < 0 else "neutral")
-            ), 
-            unsafe_allow_html=True
-        )
+        with st.container(border=True):
+            st.metric(
+                label="Simulated Excess Capital", 
+                value=f"${sim_excess:,.0f}", 
+                delta=f"${excess_delta:,.0f} vs Baseline", 
+                delta_color="inverse"
+            )
 
     st.markdown("---")
 
     # 5. Narrative Explanation of what happened
     st.subheader("📝 Scenario Analysis Report")
-    
-    # Generate natural language summary of the simulation results
     narrative = ""
     if sim_demand_increase > 0:
         narrative += f"- **Demand Surge:** A **{sim_demand_increase}%** demand surge has increased consumption rates across the portfolio. "
@@ -202,11 +193,38 @@ else:
 
     st.markdown("---")
 
-    # 6. Top 10 Most Affected SKUs Table
+    # 6. Side-by-Side Comparative Graph
+    st.subheader("📊 Capital Requirements by Category: Baseline vs. Scenario")
+    
+    # Aggregate baseline and simulated capital by category
+    df_base_cat = df_recs_cost.groupby('category')['baseline_cost'].sum().reset_index()
+    df_sim_cat = df_sim.groupby('category')['financial_impact'].sum().reset_index()
+    
+    df_chart_data = df_base_cat.merge(df_sim_cat, on='category', how='outer').fillna(0.0)
+    df_chart_data.columns = ['Category', 'Baseline Capital ($)', 'Scenario Capital ($)']
+    
+    # Melt for side-by-side grouping
+    df_melted = pd.melt(df_chart_data, id_vars=['Category'], value_vars=['Baseline Capital ($)', 'Scenario Capital ($)'],
+                        var_name='Scenario Type', value_name='Capital ($)')
+    
+    fig_comp = px.bar(
+        df_melted,
+        x='Category',
+        y='Capital ($)',
+        color='Scenario Type',
+        barmode='group',
+        color_discrete_sequence=['#475569', '#2563eb'], # gray and blue
+        title="BOM Purchase Capital Comparison by Product Category"
+    )
+    apply_chart_theme(fig_comp)
+    st.plotly_chart(fig_comp, use_container_width=True)
+
+    st.markdown("---")
+
+    # 7. Top 10 Most Affected SKUs Table
     st.subheader("📋 Top 10 SKUs Most Affected by This Scenario")
     st.caption("Shows SKUs with the largest change in Suggested Order Quantity under the active simulation.")
     
-    # Merge baseline and simulated suggested order quantities
     df_baseline_suggested = df_recs[['sku_id', 'warehouse_id', 'suggested_order_qty']].rename(
         columns={'suggested_order_qty': 'baseline_suggested'}
     )

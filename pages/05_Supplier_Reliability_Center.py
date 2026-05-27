@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from src.database import load_dataframe_from_table
-from src.styling import inject_custom_css, create_kpi_card
+from src.styling import inject_custom_css
 from src.charts import plot_supplier_risk_matrix, plot_supplier_otd_bar
 from src.ai_assistant import summarize_supplier_risk_ai
 
@@ -40,35 +40,35 @@ if df_supplier.empty:
 else:
     # 2. Calculate KPIs
     avg_risk = df_supplier['risk_score'].mean()
-    
-    # Suppliers below OTD target of 95%
     otd_breaches = len(df_supplier[df_supplier['on_time_delivery_rate'] < 0.95])
     
-    # Delayed PO count (expected arrival < today, status is open or in transit)
     today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
     delayed_pos = df_po[(df_po['status'].isin(['Open', 'In Transit'])) & (df_po['expected_arrival_date'] < today_str)]
     delayed_po_count = len(delayed_pos)
     
-    # SKUs tied to single-source suppliers
     single_source_sups = df_supplier[df_supplier['single_source_flag'] == 1]['supplier_id'].tolist()
     single_source_skus_count = len(df_sku[df_sku['supplier_id'].isin(single_source_sups)])
     
-    # SKUs tied to high-risk suppliers (>60 score)
     high_risk_sups = df_supplier[df_supplier['risk_score'] > 60]['supplier_id'].tolist()
     risky_skus_count = len(df_sku[df_sku['supplier_id'].isin(high_risk_sups)])
 
-    # Display KPI Cards
+    # Display KPI Cards using native components
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.markdown(create_kpi_card("Avg Supplier Risk", f"{avg_risk:.1f}/100", "Moderate Network", "neutral"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Avg Supplier Risk", value=f"{avg_risk:.1f}/100", help="Average risk score across active suppliers")
     with col2:
-        st.markdown(create_kpi_card("OTD Breaches (<95%)", f"{otd_breaches} Vendors", "Action Required", "down"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="OTD Breaches (<95%)", value=f"{otd_breaches} Vendors", delta_color="inverse")
     with col3:
-        st.markdown(create_kpi_card("Delayed PO Count", f"{delayed_po_count} Orders", "Transit Gaps", "down"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Delayed PO Count", value=f"{delayed_po_count} Orders", delta_color="inverse")
     with col4:
-        st.markdown(create_kpi_card("Single-Source SKUs", f"{single_source_skus_count} SKUs", "High Vulnerability", "neutral"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Single-Source SKUs", value=f"{single_source_skus_count} SKUs")
     with col5:
-        st.markdown(create_kpi_card("High Risk Tied SKUs", f"{risky_skus_count} SKUs", "Risk Score > 60", "down"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="High Risk Tied SKUs", value=f"{risky_skus_count} SKUs", delta_color="inverse")
 
     st.markdown("---")
 
@@ -118,7 +118,7 @@ else:
             summary_text = summarize_supplier_risk_ai(df_supplier, df_sku, df_po, api_key=api_key)
             st.markdown(
                 f"""
-                <div class="saas-card" style="border-left: 4px solid #bc8cff; background-color: rgba(188, 140, 255, 0.05);">
+                <div style="border-left: 4px solid #8b5cf6; background-color: #111827; padding: 18px; border-radius: 6px;">
                     {summary_text}
                 </div>
                 """,

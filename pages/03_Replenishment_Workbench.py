@@ -3,7 +3,7 @@ import pandas as pd
 import datetime
 import random
 from src.database import get_db_connection, load_dataframe_from_table
-from src.styling import inject_custom_css, create_kpi_card
+from src.styling import inject_custom_css
 from src.recommendations import generate_recommendations
 from src.ai_assistant import create_procurement_note
 
@@ -23,7 +23,8 @@ st.sidebar.subheader("Replenishment Workbench")
 st.sidebar.markdown("---")
 st.sidebar.info(
     "📥 **Procurement Workbench:** Planners review suggested replenishment and expedite recommendations here. "
-    "Check elements to approve, then click 'Commit Checked Orders' to record them as purchase orders in SQLite."
+    "Check elements to approve, then click 'Commit Checked Orders' to record them as purchase orders in SQLite. "
+    "You can modify the quantity directly before checking approve."
 )
 
 st.title("Replenishment Workbench")
@@ -49,18 +50,12 @@ def load_workbench_data():
         how='left'
     )
     
-    # Calculate financial impact (Unit Cost * Suggested Qty)
     df_merged['financial_impact'] = df_merged['suggested_order_qty'] * df_merged['unit_cost']
-    
-    # Filter for SKUs that need action (Order or Expedite)
     df_actions = df_merged[df_merged['suggested_action'].isin(['Place Order', 'Expedite PO'])].copy()
     
-    # Sort by risk level priority (Critical -> High -> Medium)
     priority_map = {'Critical': 1, 'High': 2, 'Medium': 3, 'Low': 4, 'Healthy': 5}
     df_actions['priority_num'] = df_actions['risk_level'].map(priority_map).fillna(5)
     df_actions = df_actions.sort_values(by=['priority_num', 'financial_impact'], ascending=[True, False])
-    
-    # Assign row number priority
     df_actions.insert(0, 'priority', range(1, len(df_actions) + 1))
     
     return df_actions
@@ -70,41 +65,41 @@ df_workbench = load_workbench_data()
 if df_workbench.empty:
     st.success("🎉 All SKUs are currently healthy! No replenishment actions are recommended at this time.")
 else:
-    # 2. Display summary metric cards
+    # 2. Display summary metric cards using native widgets
     total_actions = len(df_workbench)
     order_actions = df_workbench[df_workbench['suggested_action'] == 'Place Order']
     expedite_actions = df_workbench[df_workbench['suggested_action'] == 'Expedite PO']
-    
     total_capital_needed = order_actions['financial_impact'].sum()
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.markdown(create_kpi_card("Replenishment Actions", f"{total_actions}", "Action Items", "neutral"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Replenishment Actions", value=f"{total_actions}")
     with col2:
-        st.markdown(create_kpi_card("New Orders Suggested", f"{len(order_actions)} SKUs", "Replenishments", "up"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="New Orders Suggested", value=f"{len(order_actions)} SKUs")
     with col3:
-        st.markdown(create_kpi_card("Expedite Requests", f"{len(expedite_actions)} Open POs", "Lead-Time Breaches", "down"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Expedite Requests", value=f"{len(expedite_actions)} Open POs")
     with col4:
-        st.markdown(create_kpi_card("Capital Requirement", f"${total_capital_needed:,.2f}", "MOQ & Case Rounded", "neutral"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Capital Requirement", value=f"${total_capital_needed:,.0f}")
 
     st.markdown("---")
 
-    # 3. Interactive Data Editor for approvals
+    # 3. Interactive Data Editor for approvals (with editable Suggested Qty)
     st.subheader("📋 Replenishment Proposals Queue")
-    st.caption("Double click checkboxes under 'Approve' and 'Reviewed' to select records. Click 'Commit Approved Orders' below to submit them.")
+    st.caption("Double click checkboxes under 'Approve' and 'Reviewed' to select. Double click 'Suggested Qty' to manually modify order amounts before submitting.")
 
-    # Add default checkboxes in dataframe
     df_workbench['Approve'] = False
     df_workbench['Reviewed'] = False
     
-    # Select columns to display
     display_cols = [
         'Approve', 'Reviewed', 'priority', 'sku_id', 'sku_name', 'warehouse_id', 
         'supplier_name', 'inventory_position', 'reorder_point', 'suggested_order_qty', 
         'suggested_order_date', 'suggested_action', 'reason_code', 'financial_impact'
     ]
     
-    # Render with Streamlit Data Editor
     edited_df = st.data_editor(
         df_workbench[display_cols],
         column_config={
@@ -117,7 +112,7 @@ else:
             'supplier_name': st.column_config.TextColumn('Supplier', disabled=True),
             'inventory_position': st.column_config.NumberColumn('Position', disabled=True),
             'reorder_point': st.column_config.NumberColumn('ROP', disabled=True),
-            'suggested_order_qty': st.column_config.NumberColumn('Suggested Qty', disabled=True),
+            'suggested_order_qty': st.column_config.NumberColumn('Suggested Qty', disabled=False, min_value=0, step=1, help="Editable quantity field"),
             'suggested_order_date': st.column_config.TextColumn('Target Date', disabled=True),
             'suggested_action': st.column_config.TextColumn('Action', disabled=True),
             'reason_code': st.column_config.TextColumn('Reason Code', disabled=True),
@@ -137,7 +132,6 @@ else:
             if approved_rows.empty:
                 st.warning("No orders checked for approval. Select the checkboxes under 'Approve'.")
             else:
-                # Commit to purchase_orders table in SQLite
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 
@@ -148,6 +142,9 @@ else:
                     sku_id = row['sku_id']
                     wh_id = row['warehouse_id']
                     qty = int(row['suggested_order_qty'])
+                    
+                    if qty <= 0:
+                        continue # Skip zero order approvals
                     
                     # Find supplier ID for SKU
                     cursor.execute("SELECT supplier_id, default_lead_time_days FROM sku_master WHERE sku_id = ?", (sku_id,))
@@ -162,15 +159,12 @@ else:
                     po_id = f"PO-APP-{random.randint(10000, 99999)}"
                     exp_date = (datetime.date.today() + datetime.timedelta(days=lt_days)).isoformat()
                     
-                    # 1. Insert new purchase order
+                    # Insert new purchase order
                     cursor.execute("""
                         INSERT INTO purchase_orders 
                         (po_id, sku_id, supplier_id, warehouse_id, order_date, expected_arrival_date, actual_arrival_date, order_qty, received_qty, status)
                         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, 'Open')
                     """, (po_id, sku_id, supplier_id, wh_id, today_str, exp_date, qty))
-                    
-                    # 2. Update stock status - add quantity to on_order_qty in local memory / update the database directly?
-                    # The ROP calculations dynamically pull open POs, so we don't need to manually update inventory_status.
                     
                     success_count += 1
                 

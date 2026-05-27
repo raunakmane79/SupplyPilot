@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from src.database import get_db_connection, load_dataframe_from_table
-from src.styling import inject_custom_css, create_kpi_card
+from src.styling import inject_custom_css
 from src.charts import (
     plot_inventory_health_donut, 
     plot_stockout_exposure_bar, 
@@ -24,8 +24,8 @@ st.sidebar.title("SupplyPilot AI")
 st.sidebar.subheader("Inventory Command Center")
 st.sidebar.markdown("---")
 st.sidebar.info(
-    "💡 **Operations Dashboard:** This screen displays aggregated KPI metrics, risk trends, "
-    "and financial exposure for Meridian Retail Group. Select other pages from the sidebar to dive deeper."
+    "💡 **Operations Dashboard:** Displays aggregated KPI metrics, risk trends, "
+    "and financial exposure for Meridian Retail Group. Select other pages from the sidebar to inspect items."
 )
 
 # Title
@@ -40,7 +40,7 @@ def load_dashboard_data():
     df_supplier = load_dataframe_from_table('supplier_master')
     df_po = load_dataframe_from_table('purchase_orders')
     
-    # Merge SKU cost and category details into recommendations
+    # Merge SKU details into recommendations
     if not df_recs.empty and not df_sku.empty:
         df_merged = df_recs.merge(
             df_sku[['sku_id', 'sku_name', 'category', 'unit_cost', 'selling_price', 'service_level_target']], 
@@ -78,51 +78,56 @@ else:
     
     actions_count = len(df_recs_merged[df_recs_merged['suggested_action'].isin(['Place Order', 'Expedite PO'])])
 
-    # 3. Display KPIs in Grid (Two rows of cards)
-    st.markdown("#### Primary Health Indicators")
-    row1_col1, row1_col2, row1_col3, row1_col4, row1_col5 = st.columns(5)
+    # 3. Display KPIs in Grid using native containers
+    st.subheader("Core Health Metrics")
     
+    row1_col1, row1_col2, row1_col3, row1_col4, row1_col5 = st.columns(5)
     with row1_col1:
-        st.markdown(create_kpi_card("System Health Index", f"{health_score}%", "Normal", "neutral", "Percentage of SKUs operating within healthy tolerances"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="System Health Index", value=f"{health_score}%", help="Percentage of SKUs operating within healthy tolerances")
     with row1_col2:
-        st.markdown(create_kpi_card("Active Stockout Exposure", f"${total_stockout_exposure:,.2f}", f"{critical_skus + high_skus} SKUs at Risk", "down", "Revenue at risk of lost sales due to near-term depletion"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Stockout Exposure", value=f"${total_stockout_exposure:,.0f}", delta=f"{critical_skus + high_skus} SKUs at Risk", delta_color="inverse", help="Revenue at risk of lost sales due to near-term depletion")
     with row1_col3:
-        st.markdown(create_kpi_card("Excess Inventory Value", f"${total_excess_capital:,.2f}", "Working Capital Lock", "neutral", "Capital currently tied up in overstocked/non-moving items"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Excess Capital Lockup", value=f"${total_excess_capital:,.0f}", help="Capital currently tied up in overstocked/non-moving items")
     with row1_col4:
-        st.markdown(create_kpi_card("Active Replenishments", f"{actions_count} Actions", "Due This Week", "up", "Number of purchase orders or expediting actions recommended immediately"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Open Replenishments", value=f"{actions_count} Actions", help="Number of purchase orders or expediting actions recommended immediately")
     with row1_col5:
-        st.markdown(create_kpi_card("In-Transit PO Capital", f"${open_po_value:,.2f}", f"{len(df_po_open)} Open Orders", "neutral", "Financial value of components and SKUs currently on-order"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="In-Transit PO Value", value=f"${open_po_value:,.0f}", delta=f"{len(df_po_open)} Open POs", help="Financial value of components and SKUs currently on-order")
 
-    st.markdown("#### Operational Diagnostics")
+    st.subheader("Operational Context")
     row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
     with row2_col1:
-        st.markdown(create_kpi_card("Total Monitored SKUs", f"{total_skus}", "Active Portfolio", "neutral", "Total unique items tracked across warehouses"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Monitored SKUs", value=f"{total_skus}")
     with row2_col2:
-        st.markdown(create_kpi_card("Critical Risk SKU Count", f"{critical_skus}", "Requires Action", "down", "SKUs that will stockout before replenishment can arrive"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Critical Risk SKUs", value=f"{critical_skus}", delta="Immediate action", delta_color="inverse")
     with row2_col3:
-        st.markdown(create_kpi_card("Average Target Service Level", f"{avg_service_level:.1f}%", "Target Compliance", "neutral", "Weighted service level commitment to customers"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Avg Target Service Level", value=f"{avg_service_level:.1f}%")
     with row2_col4:
-        st.markdown(create_kpi_card("Supplier Network Risk Score", f"{avg_supplier_risk:.1f}/100", "Moderate", "neutral", "Average risk score across active suppliers"), unsafe_allow_html=True)
+        with st.container(border=True):
+            st.metric(label="Supplier Network Risk", value=f"{avg_supplier_risk:.1f}/100", help="Average risk score across active suppliers")
 
     st.markdown("---")
 
     # 4. Charts Section
     col_chart1, col_chart2 = st.columns(2)
-    
     with col_chart1:
         fig_donut = plot_inventory_health_donut(df_recs_merged)
         st.plotly_chart(fig_donut, use_container_width=True)
-        
     with col_chart2:
         fig_exposure = plot_stockout_exposure_bar(df_recs_merged)
         st.plotly_chart(fig_exposure, use_container_width=True)
         
     col_chart3, col_chart4 = st.columns(2)
-    
     with col_chart3:
         fig_excess = plot_excess_inventory_bar(df_recs_merged)
         st.plotly_chart(fig_excess, use_container_width=True)
-        
     with col_chart4:
         fig_trend = plot_risk_trend()
         st.plotly_chart(fig_trend, use_container_width=True)
